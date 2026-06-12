@@ -1,0 +1,7 @@
+/release/
+/artifacts/
+svneasy-client.json
+*.log
+*.bak-*
+.DS_Store
+Thumbs.db

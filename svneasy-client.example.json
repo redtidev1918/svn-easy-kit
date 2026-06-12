@@ -1,0 +1,14 @@
+{
+  "workingCopy": "D:\\SVN\\MyWorkingCopy",
+  "scanRoot": "MyProject",
+  "targets": [
+    "MyProject\\Source",
+    "MyProject\\Config",
+    "MyProject\\Content",
+    "MyProject\\MyProject.uproject"
+  ],
+  "pollSeconds": 2,
+  "respectSvnIgnore": false,
+  "autoDelete": true,
+  "logFile": "svneasy-client.log"
+}
