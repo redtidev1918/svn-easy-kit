@@ -1,213 +1,115 @@
 # SVN Easy Kit
 
-一套小巧的 SVN 客户端与服务端辅助工具。发布包是原生单文件程序，不要求用户安装 Python、Node.js 或 .NET。
+让 SVN 的日常操作简单一点：
 
-- `SvnEasyClient`：监控用户指定的白名单路径，自动登记新增和删除，避免每次手动执行 `svn add`、`svn delete`。
-- `SvnEasyServer`：创建独立仓库，复制模板仓库的用户和权限配置，并提供用户与路径权限管理。
+- 客户端自动登记指定项目中的新增、修改和删除。
+- 服务端快速创建独立仓库，并复制旧仓库的用户和权限。
+- 原生单文件程序，不需要 Python、Node.js 或 .NET。
+- 不自动提交代码，提交前仍由用户确认。
 
-工具不会自动提交代码。所有变化仍由用户检查并提交。
-
-## 下载
-
-从 [GitHub Releases](https://github.com/redtidev1918/svn-easy-kit/releases) 下载对应平台的压缩包：
-
-- Windows x64
-- Linux x64 / ARM64
-- macOS Intel / Apple Silicon
-
-## 客户端快速开始
+## 客户端：双击即可
 
 ### Windows
 
-1. 解压 Windows 发布包。
-2. 双击 `install-client-windows.cmd`。
-3. 首次运行时根据提示填写 SVN 工作副本和白名单路径。
+1. 从 [Releases](https://github.com/redtidev1918/svn-easy-kit/releases) 下载 Windows 压缩包并解压。
+2. 双击 `Start-SvnEasy-Windows.cmd` 或 `SvnEasyClient.exe`。
+3. 按编号选择工作副本和项目，一路回车接受推荐设置。
 
-安装程序会自动：
+程序会自动：
 
-- 检查 SVN 命令行客户端。
-- 缺少 SVN 时通过 `winget` 安装。
-- 执行首次同步。
-- 注册为用户登录后后台运行。
+- 搜索桌面、文档和常见项目目录中的 SVN 工作副本。
+- 识别常见项目文件及 `Source`、`src`、`Config`、`Content`、`assets` 等目录。
+- 缺少 SVN 命令行工具时自动安装。
+- 启用登录后后台追踪。
+- 创建开始菜单快捷方式 `SVN Easy Client`。
 
-需要提交时双击：
+以后可以从开始菜单搜索 `SVN Easy Client`，会看到：
 
 ```text
-sync-and-commit-windows.cmd
+1. 同步变化并打开提交窗口
+2. 修改追踪项目或目录
+3. 修复后台自动追踪
+4. 检查状态
+5. 关闭后台自动追踪
 ```
 
-它会先同步白名单，再打开 TortoiseSVN 提交窗口。
+### Linux / macOS 客户端
 
-### Linux 与 macOS
-
-先生成配置：
+运行程序即可进入相同向导：
 
 ```bash
-./SvnEasyClient init --config ./svneasy-client.json
-```
-
-检查并安装后台服务：
-
-```bash
-./SvnEasyClient install --config ./svneasy-client.json
+./SvnEasyClient
 ```
 
 Linux 使用 systemd 用户服务，macOS 使用 LaunchAgent。
 
-## 客户端配置
+## 客户端会做什么
 
-配置向导会询问三个核心项目：
+- 修改文件：SVN 自动识别。
+- 新建文件：白名单内自动登记为新增。
+- 删除文件：白名单内自动登记为删除。
+- 白名单外内容：不会自动处理。
+- 提交：始终需要用户确认。
 
-1. `workingCopy`：包含 `.svn` 的工作副本根目录。
-2. `scanRoot`：提交和状态扫描的项目目录。
-3. `targets`：允许自动登记新增与删除的白名单路径。
+重命名若需要保留移动历史，请使用 SVN 重命名或 TortoiseSVN 的“修复移动”。
 
-通用示例：
+## 服务端：菜单操作
 
-```json
-{
-  "workingCopy": "D:\\SVN\\Workspace",
-  "scanRoot": "GameProject",
-  "targets": [
-    "GameProject\\Source",
-    "GameProject\\Config",
-    "GameProject\\Content",
-    "GameProject\\GameProject.uproject"
-  ],
-  "pollSeconds": 2,
-  "respectSvnIgnore": false,
-  "autoDelete": true,
-  "logFile": "svneasy-client.log"
-}
-```
-
-相对路径均以 `workingCopy` 为基准。白名单可用于任何项目结构，不限于 Unreal Engine。
-
-### 客户端行为
-
-- 已修改文件：由 SVN 原生识别。
-- 新文件或目录：在白名单内自动执行 `svn add`。
-- 已删除文件或目录：在白名单内自动执行 `svn delete --force`。
-- 白名单外路径：不会自动添加或删除。
-- `respectSvnIgnore: false`：显式白名单优先，即使文件命中忽略规则也会登记。
-- `respectSvnIgnore: true`：继续遵守 SVN 忽略规则。
-
-文件系统中的重命名通常会显示为“删除旧文件 + 新增新文件”。需要保留移动历史时，请使用 SVN 的重命名功能，或在 TortoiseSVN 提交窗口中使用“修复移动”。
-
-### 常用命令
-
-```bash
-SvnEasyClient init      --config ./svneasy-client.json
-SvnEasyClient doctor    --config ./svneasy-client.json
-SvnEasyClient sync      --config ./svneasy-client.json
-SvnEasyClient watch     --config ./svneasy-client.json
-SvnEasyClient commit    --config ./svneasy-client.json
-SvnEasyClient install   --config ./svneasy-client.json
-SvnEasyClient uninstall --config ./svneasy-client.json
-```
-
-## 服务端快速开始
-
-### Linux 一键安装
-
-解压 Linux 发布包后，以具备仓库目录写权限的用户运行：
+下载对应 Linux 发布包并解压：
 
 ```bash
 chmod +x install-server-linux.sh
 sudo ./install-server-linux.sh
 ```
 
-工具会检测 CPU 架构、Subversion 和正在运行的 `svnserve -r` 参数，然后进入交互菜单。
+程序会自动识别：
 
-如果无法自动识别仓库根目录，可使用：
+- x64 或 ARM64
+- Subversion 是否已安装
+- `svnserve -r` 指定的仓库根目录
+- 已有仓库列表
 
-```bash
-svneasy-server doctor --root /path/to/repositories
+进入菜单后，通常只需要：
+
+1. 选择“创建新仓库”。
+2. 用编号选择一个旧仓库作为权限模板。
+3. 输入新仓库名。
+4. 回车确认。
+
+程序会自动创建独立仓库、复制用户与权限、调整仓库名权限段，并创建：
+
+```text
+trunk/
+branches/
+tags/
 ```
 
-### 创建独立仓库并迁移权限
+同一菜单也能新增用户和修改读写权限。修改认证文件前会自动备份。
 
-从现有仓库复制认证配置：
+## 高级命令
 
-```bash
-svneasy-server create \
-  --from template-repo \
-  --name new-repo \
-  --layout=true
-```
-
-同时新增用户：
+不使用菜单时也可以执行：
 
 ```bash
-svneasy-server create \
-  --from template-repo \
-  --name new-repo \
-  --user alice \
-  --access rw
+SvnEasyClient sync --config ./svneasy-client.json
+
+svneasy-server create --from template-repo --name new-repo
+svneasy-server user --repo new-repo --name alice --access rw
+svneasy-server permission --repo new-repo --principal alice --path /trunk --access rw
 ```
 
-没有通过 `--password` 明文传入密码时，程序会提示隐藏输入。
-
-### 用户与权限管理
-
-新增或更新用户：
+查看全部参数：
 
 ```bash
-svneasy-server user \
-  --repo new-repo \
-  --name bob \
-  --access rw
+SvnEasyClient help
+svneasy-server help
 ```
 
-设置用户权限：
+## 支持平台
 
-```bash
-svneasy-server permission \
-  --repo new-repo \
-  --principal bob \
-  --path /trunk \
-  --access rw
-```
-
-设置组权限：
-
-```bash
-svneasy-server permission \
-  --repo new-repo \
-  --principal @developers \
-  --path /branches \
-  --access r
-```
-
-撤销访问：
-
-```bash
-svneasy-server permission \
-  --repo new-repo \
-  --principal bob \
-  --path /private \
-  --access none
-```
-
-### 服务端迁移内容
-
-- 创建真正独立的 SVN repository。
-- 复制 `svnserve.conf` 和相关认证配置。
-- 识别相对或绝对路径的 `passwd`、`authz`、`groups-db`。
-- 将模板仓库的命名权限段改为新仓库名称。
-- 为新仓库创建独立认证文件，避免后续修改影响模板仓库。
-- 在 Linux 上复制模板仓库的所有者和组。
-- 可自动创建 `trunk`、`branches`、`tags`。
-- 修改认证文件前创建带时间戳的备份。
-
-新建仓库通常不需要重启 `svnserve`。
-
-## 安全说明
-
-- 客户端只登记工作副本变化，不自动提交。
-- 服务端修改认证文件前会备份原文件。
-- 建议避免通过命令行参数传入密码，因为命令可能进入 shell 历史；直接等待隐藏密码提示更安全。
-- 首次用于生产服务器前，建议先备份仓库目录。
+- Windows x64
+- Linux x64 / ARM64
+- macOS Intel / Apple Silicon
 
 ## 从源码构建
 
@@ -219,4 +121,4 @@ go build ./cmd/svneasy-client
 go build ./cmd/svneasy-server
 ```
 
-项目使用 MIT License。
+MIT License

@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 var repositoryNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -850,15 +850,15 @@ func interactiveMenu() error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("\nSvnEasyServer %s\n", version)
-		fmt.Println("Repository root:", s.root)
-		fmt.Println("Repositories:", strings.Join(repositories, ", "))
-		fmt.Println("1. Create repository and migrate permissions")
-		fmt.Println("2. Add/update user")
-		fmt.Println("3. Change permission")
-		fmt.Println("4. Run doctor")
+		fmt.Printf("\nSVN Easy Server %s\n", version)
+		fmt.Println("Repository folder:", s.root)
+		fmt.Printf("Found %d repositories\n", len(repositories))
+		fmt.Println("1. Create a new repository (recommended)")
+		fmt.Println("2. Add or change a user")
+		fmt.Println("3. Change access permission")
+		fmt.Println("4. Show system information")
 		fmt.Println("0. Exit")
-		choice, err := prompt(reader, "Choose", "")
+		choice, err := prompt(reader, "Choose", "1")
 		if err != nil {
 			return err
 		}
@@ -868,36 +868,81 @@ func interactiveMenu() error {
 				fmt.Println("No source repository found.")
 				continue
 			}
-			source, _ := prompt(reader, "Permission template repository", repositories[0])
+			source, selectErr := selectRepository(reader, "Copy users and permissions from", repositories)
+			if selectErr != nil {
+				return selectErr
+			}
 			name, _ := prompt(reader, "New repository name", "")
-			extraUser, _ := prompt(reader, "Optional new user (blank to skip)", "")
-			options := createOptions{source: source, name: name, createLayout: true, user: extraUser, access: "rw"}
-			if extraUser != "" {
-				options.password, err = readSecret("Password for " + extraUser + ": ")
+			options := createOptions{source: source, name: name, createLayout: true, access: "rw"}
+			addUser, yesErr := promptYesNo(reader, "Add a new user now?", false)
+			if yesErr != nil {
+				return yesErr
+			}
+			if addUser {
+				options.user, _ = prompt(reader, "User name", "")
+				options.password, err = readSecret("Password for " + options.user + ": ")
 				if err != nil {
 					return err
 				}
-				options.access, _ = prompt(reader, "Root access (rw/r/none)", "rw")
+				options.access, err = selectAccess(reader)
+				if err != nil {
+					return err
+				}
+			}
+			fmt.Println("\nReady to create:")
+			fmt.Println("  New repository:", options.name)
+			fmt.Println("  Copy settings from:", options.source)
+			fmt.Println("  Create trunk/branches/tags: yes")
+			if options.user != "" {
+				fmt.Printf("  New user: %s (%s)\n", options.user, accessLabel(options.access))
+			}
+			confirmed, confirmErr := promptYesNo(reader, "Continue?", true)
+			if confirmErr != nil {
+				return confirmErr
+			}
+			if !confirmed {
+				fmt.Println("Cancelled.")
+				continue
 			}
 			if err := s.create(options); err != nil {
 				fmt.Println("ERROR:", err)
 			}
 		case "2":
-			repository, _ := prompt(reader, "Repository", firstOrEmpty(repositories))
+			if len(repositories) == 0 {
+				fmt.Println("No repository found.")
+				continue
+			}
+			repository, selectErr := selectRepository(reader, "Select repository", repositories)
+			if selectErr != nil {
+				return selectErr
+			}
 			user, _ := prompt(reader, "User name", "")
 			password, passwordErr := readSecret("Password: ")
 			if passwordErr != nil {
 				return passwordErr
 			}
-			access, _ := prompt(reader, "Root access (rw/r/none)", "rw")
+			access, accessErr := selectAccess(reader)
+			if accessErr != nil {
+				return accessErr
+			}
 			if err := s.addOrUpdateUser(repository, user, password, access); err != nil {
 				fmt.Println("ERROR:", err)
 			}
 		case "3":
-			repository, _ := prompt(reader, "Repository", firstOrEmpty(repositories))
+			if len(repositories) == 0 {
+				fmt.Println("No repository found.")
+				continue
+			}
+			repository, selectErr := selectRepository(reader, "Select repository", repositories)
+			if selectErr != nil {
+				return selectErr
+			}
 			principal, _ := prompt(reader, "User or @group", "")
 			path, _ := prompt(reader, "Repository path", "/")
-			access, _ := prompt(reader, "Access (rw/r/none)", "rw")
+			access, accessErr := selectAccess(reader)
+			if accessErr != nil {
+				return accessErr
+			}
 			if err := s.setPermission(repository, principal, path, access); err != nil {
 				fmt.Println("ERROR:", err)
 			}
@@ -911,6 +956,73 @@ func interactiveMenu() error {
 			fmt.Println("Unknown choice.")
 		}
 	}
+}
+
+func selectRepository(reader *bufio.Reader, title string, repositories []string) (string, error) {
+	if len(repositories) == 1 {
+		fmt.Printf("%s: %s\n", title, repositories[0])
+		return repositories[0], nil
+	}
+	fmt.Println("\n" + title + ":")
+	for index, repository := range repositories {
+		fmt.Printf("%d. %s\n", index+1, repository)
+	}
+	for {
+		value, err := prompt(reader, "Enter number", "1")
+		if err != nil {
+			return "", err
+		}
+		index, parseErr := strconv.Atoi(value)
+		if parseErr == nil && index >= 1 && index <= len(repositories) {
+			return repositories[index-1], nil
+		}
+		fmt.Println("Please enter a number shown above.")
+	}
+}
+
+func selectAccess(reader *bufio.Reader) (string, error) {
+	fmt.Println("1. Read and write (recommended)")
+	fmt.Println("2. Read only")
+	fmt.Println("3. No access")
+	for {
+		value, err := prompt(reader, "Choose permission", "1")
+		if err != nil {
+			return "", err
+		}
+		switch value {
+		case "1":
+			return "rw", nil
+		case "2":
+			return "r", nil
+		case "3":
+			return "none", nil
+		default:
+			fmt.Println("Please enter 1, 2 or 3.")
+		}
+	}
+}
+
+func accessLabel(access string) string {
+	switch access {
+	case "rw":
+		return "read and write"
+	case "r":
+		return "read only"
+	default:
+		return "no access"
+	}
+}
+
+func promptYesNo(reader *bufio.Reader, label string, defaultYes bool) (bool, error) {
+	defaultValue := "n"
+	if defaultYes {
+		defaultValue = "Y"
+	}
+	value, err := prompt(reader, label+" (y/n)", defaultValue)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(value, "y") || strings.EqualFold(value, "yes"), nil
 }
 
 func prompt(reader *bufio.Reader, label, defaultValue string) (string, error) {
@@ -928,13 +1040,6 @@ func prompt(reader *bufio.Reader, label, defaultValue string) (string, error) {
 		value = defaultValue
 	}
 	return value, nil
-}
-
-func firstOrEmpty(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
 }
 
 func valueOrMissing(value string) string {

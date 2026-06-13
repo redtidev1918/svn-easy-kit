@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 type Config struct {
 	WorkingCopy      string   `json:"workingCopy"`
@@ -68,7 +68,7 @@ func main() {
 		return
 	}
 
-	command := "watch"
+	command := "menu"
 	args := os.Args[1:]
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command = strings.ToLower(args[0])
@@ -76,6 +76,14 @@ func main() {
 	}
 
 	switch command {
+	case "menu":
+		if err := clientMenu(defaultConfigPath()); err != nil {
+			exitError(err)
+		}
+	case "setup":
+		if err := setupClient(args); err != nil {
+			exitError(err)
+		}
 	case "init":
 		if err := initConfig(args); err != nil {
 			exitError(err)
@@ -103,6 +111,8 @@ func printHelp() {
 	fmt.Printf(`SvnEasyClient %s
 
 Usage:
+  SvnEasyClient                         Friendly menu / first-run setup
+  SvnEasyClient setup [--config FILE]   Automatic setup wizard
   SvnEasyClient init [--config FILE]
   SvnEasyClient sync [--config FILE]
   SvnEasyClient watch [--config FILE]
@@ -112,7 +122,8 @@ Usage:
   SvnEasyClient uninstall [--config FILE]
 
 Commands:
-  init       Interactive configuration wizard
+  setup      Discover a working copy, create config and enable auto tracking
+  init       Create or replace configuration
   sync       Register new and deleted whitelist files once
   watch      Watch whitelist paths and synchronize continuously
   commit     Synchronize, then open the TortoiseSVN commit dialog
@@ -606,26 +617,146 @@ func initConfig(args []string) error {
 		return err
 	}
 
+	cfg, err := configurationWizard(bufio.NewReader(os.Stdin))
+	if err != nil {
+		return err
+	}
+	return writeConfig(*configPath, cfg)
+}
+
+func writeConfig(configPath string, cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(configPath, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	fmt.Println("Configuration saved:", configPath)
+	return nil
+}
+
+func setupClient(args []string) error {
+	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
+	configPath := flags.String("config", defaultConfigPath(), "configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	fmt.Printf("\nSVN Easy Client %s - Easy setup\n\n", version)
+	cfg, err := configurationWizard(bufio.NewReader(os.Stdin))
+	if err != nil {
+		return err
+	}
+	if err := writeConfig(*configPath, cfg); err != nil {
+		return err
+	}
+	return installClient([]string{"--config", *configPath})
+}
+
+func clientMenu(configPath string) error {
 	reader := bufio.NewReader(os.Stdin)
-	workingCopy, err := prompt(reader, "SVN working-copy root", "")
-	if err != nil {
-		return err
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Println("No setup found. Starting the easy setup wizard...")
+		return setupClient([]string{"--config", configPath})
 	}
-	scanRoot, err := prompt(reader, "Project/scan path relative to working copy", ".")
-	if err != nil {
-		return err
-	}
-	targetText, err := prompt(reader, "Whitelist paths, comma-separated", scanRoot)
-	if err != nil {
-		return err
-	}
-	var targets []string
-	for _, item := range strings.Split(targetText, ",") {
-		if value := strings.TrimSpace(item); value != "" {
-			targets = append(targets, value)
+
+	for {
+		fmt.Printf("\nSVN Easy Client %s\n", version)
+		fmt.Println("1. Sync changes and open commit window")
+		fmt.Println("2. Change tracked project/folders")
+		fmt.Println("3. Repair or enable automatic tracking")
+		fmt.Println("4. Check status")
+		fmt.Println("5. Disable automatic tracking")
+		fmt.Println("0. Exit")
+		choice, err := prompt(reader, "Choose", "1")
+		if err != nil {
+			return err
+		}
+		switch choice {
+		case "1":
+			return runClientCommand("commit", []string{"--config", configPath})
+		case "2":
+			return setupClient([]string{"--config", configPath})
+		case "3":
+			return installClient([]string{"--config", configPath})
+		case "4":
+			return runClientCommand("doctor", []string{"--config", configPath})
+		case "5":
+			return uninstallClient([]string{"--config", configPath})
+		case "0", "q", "quit", "exit":
+			return nil
+		default:
+			fmt.Println("Please enter a number from the menu.")
 		}
 	}
-	cfg := Config{
+}
+
+func configurationWizard(reader *bufio.Reader) (Config, error) {
+	fmt.Println("Searching for SVN working copies...")
+	workingCopies := discoverWorkingCopies()
+	var workingCopy string
+	var err error
+	if len(workingCopies) == 0 {
+		fmt.Println("No working copy was found automatically.")
+		workingCopy, err = prompt(reader, "Drag or enter the folder containing .svn", "")
+		if err != nil {
+			return Config{}, err
+		}
+		workingCopy = trimDraggedPath(workingCopy)
+	} else {
+		workingCopy, err = selectPath(reader, "Select an SVN working copy", workingCopies)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	workingCopy, err = filepath.Abs(workingCopy)
+	if err != nil {
+		return Config{}, err
+	}
+	if _, err := os.Stat(filepath.Join(workingCopy, ".svn")); err != nil {
+		return Config{}, fmt.Errorf("this is not an SVN working-copy root: %s", workingCopy)
+	}
+
+	projects := discoverProjects(workingCopy)
+	project := workingCopy
+	if len(projects) > 0 {
+		project, err = selectPath(reader, "Select the project to track", projects)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+
+	targets := suggestTargets(workingCopy, project)
+	fmt.Println("\nRecommended tracked paths:")
+	for _, target := range targets {
+		fmt.Println("  +", target)
+	}
+	accept, err := prompt(reader, "Use these recommended paths? (Y/n)", "Y")
+	if err != nil {
+		return Config{}, err
+	}
+	if strings.EqualFold(accept, "n") || strings.EqualFold(accept, "no") {
+		custom, promptErr := prompt(reader, "Enter paths separated by commas", strings.Join(targets, ","))
+		if promptErr != nil {
+			return Config{}, promptErr
+		}
+		targets = splitPathList(custom)
+	}
+	if len(targets) == 0 {
+		return Config{}, errors.New("no tracked paths were selected")
+	}
+
+	scanRoot, err := filepath.Rel(workingCopy, project)
+	if err != nil {
+		return Config{}, err
+	}
+	if scanRoot == "" {
+		scanRoot = "."
+	}
+	return Config{
 		WorkingCopy:      workingCopy,
 		ScanRoot:         scanRoot,
 		Targets:          targets,
@@ -633,19 +764,234 @@ func initConfig(args []string) error {
 		RespectSvnIgnore: false,
 		AutoDelete:       true,
 		LogFile:          "svneasy-client.log",
+	}, nil
+}
+
+func discoverWorkingCopies() []string {
+	seen := make(map[string]bool)
+	var results []string
+	add := func(path string) {
+		path, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
+		path = filepath.Clean(path)
+		key := path
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(path)
+		}
+		if !seen[key] {
+			seen[key] = true
+			results = append(results, path)
+		}
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
+
+	if current, err := os.Getwd(); err == nil {
+		for path := current; ; path = filepath.Dir(path) {
+			if _, err := os.Stat(filepath.Join(path, ".svn")); err == nil {
+				add(path)
+				break
+			}
+			parent := filepath.Dir(path)
+			if parent == path {
+				break
+			}
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(*configPath), 0o755); err != nil {
-		return err
+
+	var roots []string
+	if custom := os.Getenv("SVNEASY_SEARCH_ROOT"); custom != "" {
+		roots = append(roots, custom)
 	}
-	if err := os.WriteFile(*configPath, append(data, '\n'), 0o644); err != nil {
-		return err
+	if home, err := os.UserHomeDir(); err == nil {
+		roots = append(roots,
+			filepath.Join(home, "Desktop"),
+			filepath.Join(home, "Documents"),
+			filepath.Join(home, "Projects"),
+			filepath.Join(home, "source"),
+			filepath.Join(home, "workspace"),
+		)
 	}
-	fmt.Println("Created", *configPath)
-	return nil
+	if current, err := os.Getwd(); err == nil {
+		roots = append(roots, current)
+	}
+
+	for _, root := range roots {
+		if info, err := os.Stat(root); err != nil || !info.IsDir() {
+			continue
+		}
+		rootDepth := pathDepth(root)
+		visited := 0
+		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return filepath.SkipDir
+			}
+			if !entry.IsDir() {
+				return nil
+			}
+			visited++
+			if visited > 30000 {
+				return filepath.SkipAll
+			}
+			name := strings.ToLower(entry.Name())
+			if name == ".svn" {
+				add(filepath.Dir(path))
+				return filepath.SkipDir
+			}
+			if path != root && shouldSkipDiscoveryDirectory(name) {
+				return filepath.SkipDir
+			}
+			if pathDepth(path)-rootDepth >= 5 {
+				return filepath.SkipDir
+			}
+			return nil
+		})
+	}
+	sort.Strings(results)
+	return results
+}
+
+func discoverProjects(workingCopy string) []string {
+	var projects []string
+	seen := make(map[string]bool)
+	rootDepth := pathDepth(workingCopy)
+	_ = filepath.WalkDir(workingCopy, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() {
+			if path != workingCopy && shouldSkipDiscoveryDirectory(strings.ToLower(entry.Name())) {
+				return filepath.SkipDir
+			}
+			if pathDepth(path)-rootDepth > 3 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if isProjectMarker(entry.Name()) {
+			project := filepath.Dir(path)
+			key := project
+			if runtime.GOOS == "windows" {
+				key = strings.ToLower(project)
+			}
+			if !seen[key] {
+				seen[key] = true
+				projects = append(projects, project)
+			}
+		}
+		return nil
+	})
+	if len(projects) == 0 {
+		entries, _ := os.ReadDir(workingCopy)
+		for _, entry := range entries {
+			if entry.IsDir() && !shouldSkipDiscoveryDirectory(strings.ToLower(entry.Name())) {
+				projects = append(projects, filepath.Join(workingCopy, entry.Name()))
+			}
+		}
+	}
+	sort.Strings(projects)
+	return projects
+}
+
+func suggestTargets(workingCopy, project string) []string {
+	var absolute []string
+	entries, _ := os.ReadDir(project)
+	wantedDirectories := map[string]bool{
+		"source": true, "src": true, "config": true, "content": true,
+		"assets": true, "include": true, "scripts": true, "app": true,
+	}
+	for _, entry := range entries {
+		name := strings.ToLower(entry.Name())
+		path := filepath.Join(project, entry.Name())
+		if entry.IsDir() && wantedDirectories[name] {
+			absolute = append(absolute, path)
+		}
+		if !entry.IsDir() && isProjectMarker(entry.Name()) {
+			absolute = append(absolute, path)
+		}
+	}
+	if len(absolute) == 0 {
+		absolute = append(absolute, project)
+	}
+	var relative []string
+	for _, path := range absolute {
+		value, err := filepath.Rel(workingCopy, path)
+		if err == nil {
+			relative = append(relative, value)
+		}
+	}
+	sort.Strings(relative)
+	return relative
+}
+
+func selectPath(reader *bufio.Reader, title string, paths []string) (string, error) {
+	if len(paths) == 1 {
+		fmt.Printf("%s: %s\n", title, paths[0])
+		return paths[0], nil
+	}
+	fmt.Println("\n" + title + ":")
+	for index, path := range paths {
+		fmt.Printf("%d. %s\n", index+1, path)
+	}
+	for {
+		value, err := prompt(reader, "Enter number", "1")
+		if err != nil {
+			return "", err
+		}
+		index, parseErr := strconv.Atoi(value)
+		if parseErr == nil && index >= 1 && index <= len(paths) {
+			return paths[index-1], nil
+		}
+		fmt.Println("Please enter a number shown above.")
+	}
+}
+
+func splitPathList(value string) []string {
+	var result []string
+	for _, item := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';'
+	}) {
+		item = strings.TrimSpace(trimDraggedPath(item))
+		if item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func trimDraggedPath(value string) string {
+	return strings.Trim(strings.TrimSpace(value), `"'`)
+}
+
+func pathDepth(path string) int {
+	clean := filepath.Clean(path)
+	volume := filepath.VolumeName(clean)
+	clean = strings.TrimPrefix(clean, volume)
+	return len(strings.FieldsFunc(clean, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}))
+}
+
+func shouldSkipDiscoveryDirectory(name string) bool {
+	switch name {
+	case ".git", ".svn", "node_modules", "vendor", "appdata", "binaries",
+		"intermediate", "saved", "build", "dist", "target", ".cache":
+		return true
+	default:
+		return false
+	}
+}
+
+func isProjectMarker(name string) bool {
+	lower := strings.ToLower(name)
+	switch lower {
+	case "package.json", "go.mod", "cargo.toml", "pom.xml", "cmakelists.txt",
+		"pyproject.toml", "project.godot":
+		return true
+	}
+	return strings.HasSuffix(lower, ".uproject") ||
+		strings.HasSuffix(lower, ".sln") ||
+		strings.HasSuffix(lower, ".csproj")
 }
 
 func prompt(reader *bufio.Reader, label, defaultValue string) (string, error) {
@@ -682,10 +1028,15 @@ func installClient(args []string) error {
 	if err := t.sync(); err != nil {
 		return err
 	}
-	if err := installAutostart(t.configPath); err != nil {
+	installedExecutable, installedConfig, err := deployClientFiles(t.configPath)
+	if err != nil {
 		return err
 	}
-	fmt.Println("Installation complete. Whitelist tracking will start automatically after login.")
+	if err := installAutostart(installedExecutable, installedConfig); err != nil {
+		return err
+	}
+	fmt.Println("\nDone. Automatic tracking is now enabled.")
+	fmt.Println("You can close this window.")
 	return nil
 }
 
@@ -757,13 +1108,61 @@ func installLinuxSvn() error {
 	return errors.New("no supported package manager found")
 }
 
-func installAutostart(configPath string) error {
+func deployClientFiles(configPath string) (string, string, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	executable, _ = filepath.Abs(executable)
 	configPath, _ = filepath.Abs(configPath)
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		return "", "", err
+	}
+	installDir := filepath.Join(configRoot, "SvnEasyKit")
+	if err := os.MkdirAll(installDir, 0o755); err != nil {
+		return "", "", err
+	}
+	executableName := "SvnEasyClient"
+	if runtime.GOOS == "windows" {
+		executableName += ".exe"
+	}
+	installedExecutable := filepath.Join(installDir, executableName)
+	installedConfig := filepath.Join(installDir, "svneasy-client.json")
+	if !samePath(executable, installedExecutable) {
+		if err := copyRegularFile(executable, installedExecutable, 0o755); err != nil {
+			return "", "", err
+		}
+	}
+	if !samePath(configPath, installedConfig) {
+		if err := copyRegularFile(configPath, installedConfig, 0o600); err != nil {
+			return "", "", err
+		}
+	}
+	return installedExecutable, installedConfig, nil
+}
+
+func copyRegularFile(source, target string, mode fs.FileMode) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		return err
+	}
+	if err := output.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(target, mode)
+}
+
+func installAutostart(executable, configPath string) error {
 
 	switch runtime.GOOS {
 	case "windows":
@@ -778,8 +1177,28 @@ func installAutostart(configPath string) error {
 		if err := os.WriteFile(script, []byte(content), 0o644); err != nil {
 			return err
 		}
+		programs := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs")
+		if err := os.MkdirAll(programs, 0o755); err != nil {
+			return err
+		}
+		shortcutScript := filepath.Join(os.TempDir(), "svneasy-shortcut.vbs")
+		shortcutPath := filepath.Join(programs, "SVN Easy Client.lnk")
+		shortcutContent := "Set shell = CreateObject(\"WScript.Shell\")\r\n" +
+			"Set shortcut = shell.CreateShortcut(" + vbString(shortcutPath) + ")\r\n" +
+			"shortcut.TargetPath = " + vbString(executable) + "\r\n" +
+			"shortcut.WorkingDirectory = " + vbString(filepath.Dir(executable)) + "\r\n" +
+			"shortcut.Description = \"SVN Easy Client\"\r\n" +
+			"shortcut.Save\r\n"
+		if err := os.WriteFile(shortcutScript, []byte(shortcutContent), 0o600); err != nil {
+			return err
+		}
+		defer os.Remove(shortcutScript)
+		if output, err := exec.Command("wscript.exe", shortcutScript).CombinedOutput(); err != nil {
+			return fmt.Errorf("cannot create Start menu shortcut: %v: %s", err, strings.TrimSpace(string(output)))
+		}
 		_ = exec.Command("wscript.exe", script).Start()
 		fmt.Println("Installed background startup:", script)
+		fmt.Println("Created Start menu shortcut: SVN Easy Client")
 		return nil
 	case "linux":
 		home, err := os.UserHomeDir()
@@ -852,7 +1271,12 @@ func uninstallAutostart() error {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		shortcut := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "SVN Easy Client.lnk")
+		if err := os.Remove(shortcut); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 		fmt.Println("Removed background startup:", path)
+		fmt.Println("Removed Start menu shortcut:", shortcut)
 		return nil
 	case "linux":
 		_, _ = runCommand("systemctl", ".", "--user", "disable", "--now", "svneasy-client.service")

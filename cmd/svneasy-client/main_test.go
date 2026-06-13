@@ -53,6 +53,36 @@ func TestWhitelistDoesNotIncludeSibling(t *testing.T) {
 	}
 }
 
+func TestProjectDiscoveryAndRecommendations(t *testing.T) {
+	workingCopy := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workingCopy, ".svn"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(workingCopy, "ExampleGame")
+	mustWriteTestFile(t, filepath.Join(project, "ExampleGame.uproject"), "{}")
+	for _, directory := range []string{"Source", "Config", "Content", "Saved"} {
+		if err := os.MkdirAll(filepath.Join(project, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	projects := discoverProjects(workingCopy)
+	if len(projects) != 1 || !samePath(projects[0], project) {
+		t.Fatalf("discoverProjects() = %#v, want %q", projects, project)
+	}
+
+	targets := suggestTargets(workingCopy, project)
+	joined := strings.Join(targets, "|")
+	for _, expected := range []string{"ExampleGame.uproject", "Source", "Config", "Content"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("recommended targets do not contain %q: %#v", expected, targets)
+		}
+	}
+	if strings.Contains(joined, "Saved") {
+		t.Fatalf("cache/output directory was recommended: %#v", targets)
+	}
+}
+
 func TestIntegrationSyncWhitelist(t *testing.T) {
 	if os.Getenv("SVNEASY_INTEGRATION") != "1" {
 		t.Skip("set SVNEASY_INTEGRATION=1 to run")
