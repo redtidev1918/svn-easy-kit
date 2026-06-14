@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 type Config struct {
 	WorkingCopy      string   `json:"workingCopy"`
@@ -96,7 +96,7 @@ func main() {
 		if err := uninstallClient(args); err != nil {
 			exitError(err)
 		}
-	case "sync", "watch", "commit", "doctor":
+	case "sync", "watch", "commit", "update", "preview", "doctor":
 		if err := runClientCommand(command, args); err != nil {
 			exitError(err)
 		}
@@ -117,16 +117,20 @@ Usage:
   SvnEasyClient sync [--config FILE]
   SvnEasyClient watch [--config FILE]
   SvnEasyClient commit [--config FILE]
+  SvnEasyClient update [--config FILE]
+  SvnEasyClient preview [--config FILE]
   SvnEasyClient doctor [--config FILE]
   SvnEasyClient install [--config FILE]
   SvnEasyClient uninstall [--config FILE]
 
 Commands:
-  setup      Discover a working copy, create config and enable auto tracking
+  setup      Select an existing working copy and enable auto tracking
   init       Create or replace configuration
   sync       Register new and deleted whitelist files once
   watch      Watch whitelist paths and synchronize continuously
   commit     Synchronize, then open the TortoiseSVN commit dialog
+  update     Update the project from the SVN server
+  preview    Show changes in beginner-friendly language
   doctor     Check configuration and required SVN tools
   install    Install missing SVN CLI and enable background startup
   uninstall  Remove background startup; files and SVN data are untouched
@@ -156,6 +160,10 @@ func runClientCommand(command string, args []string) error {
 			return err
 		}
 		return t.openCommit()
+	case "update":
+		return t.openUpdate()
+	case "preview":
+		return t.preview()
 	case "doctor":
 		return t.doctor()
 	}
@@ -365,6 +373,39 @@ func (t *tracker) status() ([]statusEntry, error) {
 	return entries, nil
 }
 
+func (t *tracker) preview() error {
+	entries, err := t.status()
+	if err != nil {
+		return err
+	}
+	counts := make(map[string]int)
+	for _, entry := range entries {
+		path := t.absoluteStatusPath(entry.Path)
+		if !t.isWhitelisted(path) {
+			continue
+		}
+		counts[entry.Status.Item]++
+	}
+
+	fmt.Fprintln(t.log, "\n当前项目状态")
+	fmt.Fprintln(t.log, "--------------------------------")
+	fmt.Fprintf(t.log, "项目位置：%s\n", t.scanRoot)
+	fmt.Fprintf(t.log, "新增内容：%d\n", counts["unversioned"]+counts["added"])
+	fmt.Fprintf(t.log, "修改内容：%d\n", counts["modified"]+counts["replaced"])
+	fmt.Fprintf(t.log, "删除内容：%d\n", counts["missing"]+counts["deleted"])
+	fmt.Fprintf(t.log, "冲突内容：%d\n", counts["conflicted"]+counts["obstructed"])
+	total := counts["unversioned"] + counts["added"] + counts["modified"] +
+		counts["replaced"] + counts["missing"] + counts["deleted"] +
+		counts["conflicted"] + counts["obstructed"]
+	if total == 0 {
+		fmt.Fprintln(t.log, "结果：没有需要提交的变化。")
+	} else {
+		fmt.Fprintln(t.log, "结果：以上变化尚未提交到服务器。")
+	}
+	fmt.Fprintln(t.log, "--------------------------------")
+	return nil
+}
+
 func (t *tracker) watch() error {
 	t.logf("WATCH  SvnEasyClient %s", version)
 	t.logf("WATCH  working copy: %s", t.config.WorkingCopy)
@@ -379,11 +420,16 @@ func (t *tracker) watch() error {
 	if err != nil {
 		return err
 	}
+	configStamp := fileStamp(t.configPath)
 	ticker := time.NewTicker(time.Duration(t.config.PollSeconds) * time.Second)
 	defer ticker.Stop()
 	fullReconcile := 0
 
 	for range ticker.C {
+		if currentStamp := fileStamp(t.configPath); currentStamp != configStamp {
+			t.logf("WATCH  configuration changed; handing over to the new tracker")
+			return nil
+		}
 		current, err := t.fingerprint()
 		if err != nil {
 			t.logf("ERROR  %v", err)
@@ -400,6 +446,14 @@ func (t *tracker) watch() error {
 		}
 	}
 	return nil
+}
+
+func fileStamp(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 }
 
 func (t *tracker) fingerprint() (string, error) {
@@ -483,6 +537,36 @@ func (t *tracker) openCommit() error {
 		return err
 	}
 	return errors.New("TortoiseSVN was not found; review the status above and run svn commit manually")
+}
+
+func (t *tracker) openUpdate() error {
+	updatePath := t.scanRoot
+	if runtime.GOOS == "windows" {
+		for _, candidate := range tortoiseProcCandidates() {
+			if stat, err := os.Stat(candidate); err == nil && !stat.IsDir() {
+				cmd := exec.Command(candidate, "/command:update", "/path:"+updatePath)
+				if err := cmd.Start(); err != nil {
+					return err
+				}
+				fmt.Println("已打开 TortoiseSVN 更新窗口。")
+				return nil
+			}
+		}
+	}
+	fmt.Println("正在从服务器更新项目...")
+	cmd := exec.Command(t.svn, "update", "--force-interactive", "--", updatePath)
+	cmd.Dir = t.config.WorkingCopy
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func tortoiseProcCandidates() []string {
+	return []string{
+		filepath.Join(os.Getenv("ProgramFiles"), "TortoiseSVN", "bin", "TortoiseProc.exe"),
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "TortoiseSVN", "bin", "TortoiseProc.exe"),
+	}
 }
 
 func (t *tracker) absoluteStatusPath(path string) string {
@@ -617,7 +701,7 @@ func initConfig(args []string) error {
 		return err
 	}
 
-	cfg, err := configurationWizard(bufio.NewReader(os.Stdin))
+	cfg, err := existingWorkingCopyWizard(bufio.NewReader(os.Stdin))
 	if err != nil {
 		return err
 	}
@@ -645,8 +729,8 @@ func setupClient(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	fmt.Printf("\nSVN Easy Client %s - Easy setup\n\n", version)
-	cfg, err := configurationWizard(bufio.NewReader(os.Stdin))
+	fmt.Printf("\nSVN Easy Client %s - 设置已有工作副本\n\n", version)
+	cfg, err := existingWorkingCopyWizard(bufio.NewReader(os.Stdin))
 	if err != nil {
 		return err
 	}
@@ -659,255 +743,235 @@ func setupClient(args []string) error {
 func clientMenu(configPath string) error {
 	reader := bufio.NewReader(os.Stdin)
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		fmt.Println("No setup found. Starting the easy setup wizard...")
-		return setupClient([]string{"--config", configPath})
+		fmt.Printf("\nSVN Easy Client %s\n", version)
+		fmt.Println("请选择你现在要做的事情：")
+		fmt.Println("1. 第一次把本地项目上传到一个空的 SVN 仓库")
+		fmt.Println("2. 管理一个已经从 SVN 检出的项目")
+		fmt.Println("0. 退出")
+		choice, choiceErr := prompt(reader, "请输入数字", "1")
+		if choiceErr != nil {
+			return choiceErr
+		}
+		switch choice {
+		case "1":
+			return firstUploadWizard(reader, configPath)
+		case "2":
+			return setupClient([]string{"--config", configPath})
+		case "0":
+			return nil
+		default:
+			return errors.New("请输入菜单中显示的数字")
+		}
 	}
 
 	for {
 		fmt.Printf("\nSVN Easy Client %s\n", version)
-		fmt.Println("1. Sync changes and open commit window")
-		fmt.Println("2. Change tracked project/folders")
-		fmt.Println("3. Repair or enable automatic tracking")
-		fmt.Println("4. Check status")
-		fmt.Println("5. Disable automatic tracking")
-		fmt.Println("0. Exit")
-		choice, err := prompt(reader, "Choose", "1")
+		fmt.Println("1. 提交今天的修改")
+		fmt.Println("2. 从服务器更新到最新版本")
+		fmt.Println("3. 查看有哪些文件发生了变化")
+		fmt.Println("4. 更换项目或重新选择追踪内容")
+		fmt.Println("5. 修复后台自动追踪")
+		fmt.Println("6. 关闭后台自动追踪")
+		fmt.Println("0. 退出")
+		choice, err := prompt(reader, "请输入数字", "1")
 		if err != nil {
 			return err
 		}
 		switch choice {
 		case "1":
-			return runClientCommand("commit", []string{"--config", configPath})
+			return guidedCommit(reader, configPath)
 		case "2":
-			return setupClient([]string{"--config", configPath})
+			return runClientCommand("update", []string{"--config", configPath})
 		case "3":
-			return installClient([]string{"--config", configPath})
+			return runClientCommand("preview", []string{"--config", configPath})
 		case "4":
-			return runClientCommand("doctor", []string{"--config", configPath})
+			return setupClient([]string{"--config", configPath})
 		case "5":
+			return installClient([]string{"--config", configPath})
+		case "6":
 			return uninstallClient([]string{"--config", configPath})
 		case "0", "q", "quit", "exit":
 			return nil
 		default:
-			fmt.Println("Please enter a number from the menu.")
+			fmt.Println("请输入菜单中显示的数字。")
 		}
 	}
 }
 
-func configurationWizard(reader *bufio.Reader) (Config, error) {
-	fmt.Println("Searching for SVN working copies...")
-	workingCopies := discoverWorkingCopies()
-	var workingCopy string
-	var err error
-	if len(workingCopies) == 0 {
-		fmt.Println("No working copy was found automatically.")
-		workingCopy, err = prompt(reader, "Drag or enter the folder containing .svn", "")
-		if err != nil {
-			return Config{}, err
+func firstUploadWizard(reader *bufio.Reader, configPath string) error {
+	fmt.Println("\n第一次上传向导")
+	fmt.Println("本工具不会自动搜索你的电脑，只操作你亲自选择的文件夹。")
+	project, err := chooseProjectFolder(reader, "请选择要上传的本地项目文件夹")
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(project, ".svn")); err == nil {
+		return errors.New("这个文件夹已经是 SVN 工作副本，请选择“管理已经检出的项目”")
+	}
+	repositoryURL, err := prompt(reader, "请粘贴空仓库的 trunk 地址", "")
+	if err != nil {
+		return err
+	}
+	repositoryURL = strings.TrimSpace(repositoryURL)
+	if repositoryURL == "" {
+		return errors.New("仓库地址不能为空")
+	}
+
+	targets := suggestTargets(project, project)
+	ignores := ignorePatterns(project)
+	printOperationPreview(project, repositoryURL, targets, ignores)
+	confirmed, err := promptYesNo(reader, "以上路径是否完全正确？", false)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return errors.New("已取消，没有修改任何文件")
+	}
+
+	svn, err := findSvn("")
+	if err != nil {
+		if err := installSvnDependency(); err != nil {
+			return err
 		}
-		workingCopy = trimDraggedPath(workingCopy)
-	} else {
-		workingCopy, err = selectPath(reader, "Select an SVN working copy", workingCopies)
+		svn, err = findSvn("")
 		if err != nil {
-			return Config{}, err
+			return err
 		}
 	}
-	workingCopy, err = filepath.Abs(workingCopy)
+
+	fmt.Println("\n正在检查远程仓库是否为空，可能会要求输入 SVN 用户名和密码...")
+	listing, err := runInteractiveCapture(svn, project, "list", "--force-interactive", repositoryURL)
+	if err != nil {
+		return fmt.Errorf("无法访问远程仓库：%w", err)
+	}
+	if strings.TrimSpace(listing) != "" {
+		return errors.New("远程 trunk 不是空的。为防止覆盖或混合项目，本工具已停止")
+	}
+
+	checkedOut := false
+	configWritten := false
+	completed := false
+	defer func() {
+		if checkedOut && !completed {
+			metadata := filepath.Join(project, ".svn")
+			if samePath(filepath.Dir(metadata), project) {
+				_ = os.RemoveAll(metadata)
+			}
+		}
+		if configWritten && !completed {
+			_ = os.Remove(configPath)
+		}
+	}()
+
+	fmt.Println("正在把本地文件夹连接到远程仓库...")
+	if err := runInteractive(svn, project, "checkout", "--depth", "empty", "--force-interactive", repositoryURL, project); err != nil {
+		return fmt.Errorf("连接远程仓库失败：%w", err)
+	}
+	checkedOut = true
+	if err := applyIgnoreProperty(svn, project, ignores); err != nil {
+		return err
+	}
+
+	cfg := configForProject(project, project, targets)
+	if err := writeConfig(configPath, cfg); err != nil {
+		return err
+	}
+	configWritten = true
+	if err := installClient([]string{"--config", configPath}); err != nil {
+		return err
+	}
+	completed = true
+
+	t, err := newTracker(configPath, false)
+	if err != nil {
+		return err
+	}
+	defer t.close()
+	fmt.Println("\n准备完成。下面只会打开提交窗口，不会自动上传。")
+	fmt.Println("请在 TortoiseSVN 窗口中再次检查文件，点击“确定”后才会真正上传。")
+	if err := t.preview(); err != nil {
+		return err
+	}
+	return t.openCommit()
+}
+
+func existingWorkingCopyWizard(reader *bufio.Reader) (Config, error) {
+	fmt.Println("请选择已经从 SVN 检出的项目文件夹。")
+	project, err := chooseProjectFolder(reader, "选择项目文件夹")
 	if err != nil {
 		return Config{}, err
 	}
-	if _, err := os.Stat(filepath.Join(workingCopy, ".svn")); err != nil {
-		return Config{}, fmt.Errorf("this is not an SVN working-copy root: %s", workingCopy)
+	workingCopy, err := findWorkingCopyRoot(project)
+	if err != nil {
+		return Config{}, err
 	}
-
-	projects := discoverProjects(workingCopy)
-	project := workingCopy
-	if len(projects) > 0 {
-		project, err = selectPath(reader, "Select the project to track", projects)
-		if err != nil {
-			return Config{}, err
-		}
-	}
-
 	targets := suggestTargets(workingCopy, project)
-	fmt.Println("\nRecommended tracked paths:")
-	for _, target := range targets {
-		fmt.Println("  +", target)
-	}
-	accept, err := prompt(reader, "Use these recommended paths? (Y/n)", "Y")
+	printOperationPreview(project, "(使用当前工作副本的远程地址)", targets, ignorePatterns(project))
+	confirmed, err := promptYesNo(reader, "是否使用以上设置？", true)
 	if err != nil {
 		return Config{}, err
 	}
-	if strings.EqualFold(accept, "n") || strings.EqualFold(accept, "no") {
-		custom, promptErr := prompt(reader, "Enter paths separated by commas", strings.Join(targets, ","))
-		if promptErr != nil {
-			return Config{}, promptErr
-		}
-		targets = splitPathList(custom)
+	if !confirmed {
+		return Config{}, errors.New("已取消，没有修改任何文件")
 	}
-	if len(targets) == 0 {
-		return Config{}, errors.New("no tracked paths were selected")
-	}
+	return configForProject(workingCopy, project, targets), nil
+}
 
-	scanRoot, err := filepath.Rel(workingCopy, project)
+func guidedCommit(reader *bufio.Reader, configPath string) error {
+	t, err := newTracker(configPath, false)
 	if err != nil {
-		return Config{}, err
+		return err
 	}
-	if scanRoot == "" {
-		scanRoot = "."
+	defer t.close()
+	if err := t.preview(); err != nil {
+		return err
 	}
-	return Config{
-		WorkingCopy:      workingCopy,
-		ScanRoot:         scanRoot,
-		Targets:          targets,
-		PollSeconds:      2,
-		RespectSvnIgnore: false,
-		AutoDelete:       true,
-		LogFile:          "svneasy-client.log",
-	}, nil
-}
-
-func discoverWorkingCopies() []string {
-	seen := make(map[string]bool)
-	var results []string
-	add := func(path string) {
-		path, err := filepath.Abs(path)
-		if err != nil {
-			return
-		}
-		path = filepath.Clean(path)
-		key := path
-		if runtime.GOOS == "windows" {
-			key = strings.ToLower(path)
-		}
-		if !seen[key] {
-			seen[key] = true
-			results = append(results, path)
-		}
+	confirmed, err := promptYesNo(reader, "自动登记新增和删除，然后打开提交窗口？", true)
+	if err != nil {
+		return err
 	}
-
-	if current, err := os.Getwd(); err == nil {
-		for path := current; ; path = filepath.Dir(path) {
-			if _, err := os.Stat(filepath.Join(path, ".svn")); err == nil {
-				add(path)
-				break
-			}
-			parent := filepath.Dir(path)
-			if parent == path {
-				break
-			}
-		}
-	}
-
-	var roots []string
-	if custom := os.Getenv("SVNEASY_SEARCH_ROOT"); custom != "" {
-		roots = append(roots, custom)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		roots = append(roots,
-			filepath.Join(home, "Desktop"),
-			filepath.Join(home, "Documents"),
-			filepath.Join(home, "Projects"),
-			filepath.Join(home, "source"),
-			filepath.Join(home, "workspace"),
-		)
-	}
-	if current, err := os.Getwd(); err == nil {
-		roots = append(roots, current)
-	}
-
-	for _, root := range roots {
-		if info, err := os.Stat(root); err != nil || !info.IsDir() {
-			continue
-		}
-		rootDepth := pathDepth(root)
-		visited := 0
-		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return filepath.SkipDir
-			}
-			if !entry.IsDir() {
-				return nil
-			}
-			visited++
-			if visited > 30000 {
-				return filepath.SkipAll
-			}
-			name := strings.ToLower(entry.Name())
-			if name == ".svn" {
-				add(filepath.Dir(path))
-				return filepath.SkipDir
-			}
-			if path != root && shouldSkipDiscoveryDirectory(name) {
-				return filepath.SkipDir
-			}
-			if pathDepth(path)-rootDepth >= 5 {
-				return filepath.SkipDir
-			}
-			return nil
-		})
-	}
-	sort.Strings(results)
-	return results
-}
-
-func discoverProjects(workingCopy string) []string {
-	var projects []string
-	seen := make(map[string]bool)
-	rootDepth := pathDepth(workingCopy)
-	_ = filepath.WalkDir(workingCopy, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return filepath.SkipDir
-		}
-		if entry.IsDir() {
-			if path != workingCopy && shouldSkipDiscoveryDirectory(strings.ToLower(entry.Name())) {
-				return filepath.SkipDir
-			}
-			if pathDepth(path)-rootDepth > 3 {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if isProjectMarker(entry.Name()) {
-			project := filepath.Dir(path)
-			key := project
-			if runtime.GOOS == "windows" {
-				key = strings.ToLower(project)
-			}
-			if !seen[key] {
-				seen[key] = true
-				projects = append(projects, project)
-			}
-		}
+	if !confirmed {
 		return nil
-	})
-	if len(projects) == 0 {
-		entries, _ := os.ReadDir(workingCopy)
-		for _, entry := range entries {
-			if entry.IsDir() && !shouldSkipDiscoveryDirectory(strings.ToLower(entry.Name())) {
-				projects = append(projects, filepath.Join(workingCopy, entry.Name()))
-			}
-		}
 	}
-	sort.Strings(projects)
-	return projects
+	if err := t.sync(); err != nil {
+		return err
+	}
+	if err := t.preview(); err != nil {
+		return err
+	}
+	fmt.Println("接下来仍需在 TortoiseSVN 窗口中点击“确定”，才会提交到服务器。")
+	return t.openCommit()
 }
 
 func suggestTargets(workingCopy, project string) []string {
 	var absolute []string
 	entries, _ := os.ReadDir(project)
-	wantedDirectories := map[string]bool{
-		"source": true, "src": true, "config": true, "content": true,
-		"assets": true, "include": true, "scripts": true, "app": true,
-	}
-	for _, entry := range entries {
-		name := strings.ToLower(entry.Name())
-		path := filepath.Join(project, entry.Name())
-		if entry.IsDir() && wantedDirectories[name] {
-			absolute = append(absolute, path)
+	if isUnrealProject(project) {
+		for _, wanted := range []string{"Config", "Content", "Source"} {
+			path := filepath.Join(project, wanted)
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				absolute = append(absolute, path)
+			}
 		}
-		if !entry.IsDir() && isProjectMarker(entry.Name()) {
-			absolute = append(absolute, path)
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".uproject") {
+				absolute = append(absolute, filepath.Join(project, entry.Name()))
+			}
+		}
+	} else {
+		wantedDirectories := map[string]bool{
+			"source": true, "src": true, "config": true, "content": true,
+			"assets": true, "include": true, "scripts": true, "app": true,
+		}
+		for _, entry := range entries {
+			name := strings.ToLower(entry.Name())
+			path := filepath.Join(project, entry.Name())
+			if entry.IsDir() && wantedDirectories[name] {
+				absolute = append(absolute, path)
+			}
+			if !entry.IsDir() && isShareableProjectFile(entry.Name()) {
+				absolute = append(absolute, path)
+			}
 		}
 	}
 	if len(absolute) == 0 {
@@ -924,74 +988,187 @@ func suggestTargets(workingCopy, project string) []string {
 	return relative
 }
 
-func selectPath(reader *bufio.Reader, title string, paths []string) (string, error) {
-	if len(paths) == 1 {
-		fmt.Printf("%s: %s\n", title, paths[0])
-		return paths[0], nil
+func chooseProjectFolder(reader *bufio.Reader, title string) (string, error) {
+	if configured := strings.TrimSpace(os.Getenv("SVNEASY_PROJECT_PATH")); configured != "" {
+		return validateProjectFolder(trimDraggedPath(configured))
 	}
-	fmt.Println("\n" + title + ":")
-	for index, path := range paths {
-		fmt.Printf("%d. %s\n", index+1, path)
-	}
-	for {
-		value, err := prompt(reader, "Enter number", "1")
-		if err != nil {
-			return "", err
+	if runtime.GOOS == "windows" {
+		if selected, err := windowsFolderDialog(title); err == nil && selected != "" {
+			fmt.Println("已选择：", selected)
+			return validateProjectFolder(selected)
 		}
-		index, parseErr := strconv.Atoi(value)
-		if parseErr == nil && index >= 1 && index <= len(paths) {
-			return paths[index-1], nil
-		}
-		fmt.Println("Please enter a number shown above.")
 	}
+	value, err := prompt(reader, "请拖入项目文件夹，或粘贴完整路径", "")
+	if err != nil {
+		return "", err
+	}
+	return validateProjectFolder(trimDraggedPath(value))
 }
 
-func splitPathList(value string) []string {
-	var result []string
-	for _, item := range strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == ';'
-	}) {
-		item = strings.TrimSpace(trimDraggedPath(item))
-		if item != "" {
-			result = append(result, item)
-		}
+func windowsFolderDialog(title string) (string, error) {
+	escaped := strings.ReplaceAll(title, "'", "''")
+	script := "Add-Type -AssemblyName System.Windows.Forms; " +
+		"$d=New-Object System.Windows.Forms.FolderBrowserDialog; " +
+		"$d.Description='" + escaped + "'; $d.ShowNewFolderButton=$false; " +
+		"if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){$d.SelectedPath}"
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
 	}
-	return result
+	return strings.TrimSpace(string(output)), nil
 }
 
 func trimDraggedPath(value string) string {
 	return strings.Trim(strings.TrimSpace(value), `"'`)
 }
 
-func pathDepth(path string) int {
-	clean := filepath.Clean(path)
-	volume := filepath.VolumeName(clean)
-	clean = strings.TrimPrefix(clean, volume)
-	return len(strings.FieldsFunc(clean, func(r rune) bool {
-		return r == '/' || r == '\\'
-	}))
+func validateProjectFolder(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("没有选择项目文件夹")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("项目文件夹不存在：%s", absolute)
+	}
+	return filepath.Clean(absolute), nil
 }
 
-func shouldSkipDiscoveryDirectory(name string) bool {
-	switch name {
-	case ".git", ".svn", "node_modules", "vendor", "appdata", "binaries",
-		"intermediate", "saved", "build", "dist", "target", ".cache":
-		return true
-	default:
+func findWorkingCopyRoot(path string) (string, error) {
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		if info, err := os.Stat(filepath.Join(current, ".svn")); err == nil && info.IsDir() {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	return "", fmt.Errorf("%s 不是 SVN 工作副本。请先使用“第一次上传”或 TortoiseSVN 检出", path)
+}
+
+func isUnrealProject(project string) bool {
+	entries, err := os.ReadDir(project)
+	if err != nil {
 		return false
 	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".uproject") {
+			return true
+		}
+	}
+	return false
 }
 
-func isProjectMarker(name string) bool {
+func isShareableProjectFile(name string) bool {
 	lower := strings.ToLower(name)
 	switch lower {
 	case "package.json", "go.mod", "cargo.toml", "pom.xml", "cmakelists.txt",
 		"pyproject.toml", "project.godot":
 		return true
 	}
-	return strings.HasSuffix(lower, ".uproject") ||
-		strings.HasSuffix(lower, ".sln") ||
-		strings.HasSuffix(lower, ".csproj")
+	return strings.HasSuffix(lower, ".uproject")
+}
+
+func ignorePatterns(project string) []string {
+	if isUnrealProject(project) {
+		return []string{
+			".idea", ".vs", "Binaries", "DerivedDataCache", "Intermediate", "Saved",
+			"*.sln", "*.suo", "*.VC.db", "*.opensdf", "*.opendb", "*.sdf", ".vsconfig",
+		}
+	}
+	return []string{".idea", ".vs", "node_modules", "build", "dist", "target", "*.log", "Thumbs.db"}
+}
+
+func printOperationPreview(project, repositoryURL string, targets, ignores []string) {
+	fmt.Println("\n请认真确认，程序只会操作下面显示的内容")
+	fmt.Println("================================================")
+	fmt.Println("本地项目：", project)
+	fmt.Println("远程仓库：", repositoryURL)
+	fmt.Println("将加入版本控制：")
+	for _, target := range targets {
+		fmt.Println("  +", target)
+	}
+	fmt.Println("将忽略：")
+	for _, pattern := range ignores {
+		fmt.Println("  -", pattern)
+	}
+	fmt.Println("================================================")
+}
+
+func configForProject(workingCopy, project string, targets []string) Config {
+	scanRoot, err := filepath.Rel(workingCopy, project)
+	if err != nil || scanRoot == "" {
+		scanRoot = "."
+	}
+	return Config{
+		WorkingCopy:      workingCopy,
+		ScanRoot:         scanRoot,
+		Targets:          targets,
+		PollSeconds:      2,
+		RespectSvnIgnore: false,
+		AutoDelete:       true,
+		LogFile:          "svneasy-client.log",
+	}
+}
+
+func applyIgnoreProperty(svn, project string, patterns []string) error {
+	temp, err := os.CreateTemp("", "svneasy-ignore-*.txt")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if _, err := temp.WriteString(strings.Join(patterns, "\n") + "\n"); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	_, err = runCommand(svn, project, "propset", "svn:ignore", "-F", tempPath, "--", project)
+	if err != nil {
+		return fmt.Errorf("设置忽略规则失败：%w", err)
+	}
+	return nil
+}
+
+func runInteractive(executable, dir string, args ...string) error {
+	cmd := exec.Command(executable, args...)
+	cmd.Dir = dir
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func runInteractiveCapture(executable, dir string, args ...string) (string, error) {
+	cmd := exec.Command(executable, args...)
+	cmd.Dir = dir
+	cmd.Stdin = os.Stdin
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), err
+	}
+	return stdout.String(), nil
+}
+
+func promptYesNo(reader *bufio.Reader, label string, defaultYes bool) (bool, error) {
+	defaultValue := "n"
+	if defaultYes {
+		defaultValue = "Y"
+	}
+	value, err := prompt(reader, label+" (y/n)", defaultValue)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(value, "y") || strings.EqualFold(value, "yes"), nil
 }
 
 func prompt(reader *bufio.Reader, label, defaultValue string) (string, error) {
@@ -1022,7 +1199,7 @@ func installClient(args []string) error {
 		return err
 	}
 	defer t.close()
-	if err := t.doctor(); err != nil {
+	if _, err := t.status(); err != nil {
 		return err
 	}
 	if err := t.sync(); err != nil {
@@ -1035,8 +1212,8 @@ func installClient(args []string) error {
 	if err := installAutostart(installedExecutable, installedConfig); err != nil {
 		return err
 	}
-	fmt.Println("\nDone. Automatic tracking is now enabled.")
-	fmt.Println("You can close this window.")
+	fmt.Println("\n设置完成：后台自动追踪已经启用。")
+	fmt.Println("现在可以关闭这个窗口。")
 	return nil
 }
 
@@ -1050,7 +1227,7 @@ func uninstallClient(args []string) error {
 }
 
 func installSvnDependency() error {
-	fmt.Println("SVN command-line client is missing; installing it automatically...")
+	fmt.Println("缺少 SVN 命令行组件，正在自动安装...")
 	switch runtime.GOOS {
 	case "windows":
 		winget, err := exec.LookPath("winget")
@@ -1123,7 +1300,7 @@ func deployClientFiles(configPath string) (string, string, error) {
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		return "", "", err
 	}
-	executableName := "SvnEasyClient"
+	executableName := "SvnEasyClient-v" + version
 	if runtime.GOOS == "windows" {
 		executableName += ".exe"
 	}

@@ -1,108 +1,114 @@
 # SVN Easy Kit
 
-让 SVN 的日常操作简单一点：
+面向 SVN 初学者的客户端和服务器辅助工具。程序不会替用户自动提交代码。
 
-- 客户端自动登记指定项目中的新增、修改和删除。
-- 服务端快速创建独立仓库，并复制旧仓库的用户和权限。
-- 原生单文件程序，不需要 Python、Node.js 或 .NET。
-- 不自动提交代码，提交前仍由用户确认。
+## Windows 客户端
 
-## 客户端：双击即可
-
-### Windows
-
-1. 从 [Releases](https://github.com/redtidev1918/svn-easy-kit/releases) 下载 Windows 压缩包并解压。
-2. 双击 `Start-SvnEasy-Windows.cmd` 或 `SvnEasyClient.exe`。
-3. 按编号选择工作副本和项目，一路回车接受推荐设置。
-
-程序会自动：
-
-- 搜索桌面、文档和常见项目目录中的 SVN 工作副本。
-- 识别常见项目文件及 `Source`、`src`、`Config`、`Content`、`assets` 等目录。
-- 缺少 SVN 命令行工具时自动安装。
-- 启用登录后后台追踪。
-- 创建开始菜单快捷方式 `SVN Easy Client`。
-
-以后可以从开始菜单搜索 `SVN Easy Client`，会看到：
+下载 Windows 发布包、解压，然后双击：
 
 ```text
-1. 同步变化并打开提交窗口
-2. 修改追踪项目或目录
-3. 修复后台自动追踪
-4. 检查状态
-5. 关闭后台自动追踪
+Start-SvnEasy-Windows.cmd
 ```
 
-### Linux / macOS 客户端
+### 第一次上传本地项目
 
-运行程序即可进入相同向导：
+选择：
 
-```bash
-./SvnEasyClient
+```text
+1. 第一次把本地项目上传到一个空的 SVN 仓库
 ```
 
-Linux 使用 systemd 用户服务，macOS 使用 LaunchAgent。
+程序会：
 
-## 客户端会做什么
+1. 打开文件夹选择窗口，由用户亲自选择项目。
+2. 要求粘贴远程 `trunk` 地址。
+3. 显示完整操作预览。
+4. 检查远程 `trunk` 是否为空。
+5. 将本地目录变成 SVN 工作副本。
+6. 设置忽略规则。
+7. 登记需要版本控制的文件。
+8. 打开 TortoiseSVN 提交窗口。
 
-- 修改文件：SVN 自动识别。
-- 新建文件：白名单内自动登记为新增。
-- 删除文件：白名单内自动登记为删除。
-- 白名单外内容：不会自动处理。
-- 提交：始终需要用户确认。
+最后仍需用户在 TortoiseSVN 中点击“确定”，文件才会上传。
 
-重命名若需要保留移动历史，请使用 SVN 重命名或 TortoiseSVN 的“修复移动”。
+### Unreal Engine 项目
 
-## 服务端：菜单操作
+检测到 `.uproject` 后，只推荐：
 
-下载对应 Linux 发布包并解压：
+```text
+Config
+Content
+Source
+项目名.uproject
+```
+
+自动忽略：
+
+```text
+.idea
+.vs
+Binaries
+DerivedDataCache
+Intermediate
+Saved
+*.sln
+.vsconfig
+```
+
+工具不会扫描桌面或文档目录，也不会猜测项目位置。
+
+### 日常使用
+
+安装后可从开始菜单打开 `SVN Easy Client`：
+
+```text
+1. 提交今天的修改
+2. 从服务器更新到最新版本
+3. 查看有哪些文件发生了变化
+4. 更换项目或重新选择追踪内容
+5. 修复后台自动追踪
+6. 关闭后台自动追踪
+```
+
+状态使用“新增、修改、删除、冲突”等普通语言显示，不要求用户理解 `A/M/D/?`。
+
+## Linux 服务端
+
+解压 Linux 发布包后运行：
 
 ```bash
 chmod +x install-server-linux.sh
 sudo ./install-server-linux.sh
 ```
 
-程序会自动识别：
+菜单可以：
 
-- x64 或 ARM64
-- Subversion 是否已安装
-- `svnserve -r` 指定的仓库根目录
-- 已有仓库列表
+- 创建独立仓库
+- 从旧仓库复制用户和权限
+- 自动创建 `trunk/branches/tags`
+- 新增或修改用户
+- 修改读写权限
 
-进入菜单后，通常只需要：
+创建仓库时只需选择模板仓库、输入新仓库名并确认。
 
-1. 选择“创建新仓库”。
-2. 用编号选择一个旧仓库作为权限模板。
-3. 输入新仓库名。
-4. 回车确认。
+## 安全原则
 
-程序会自动创建独立仓库、复制用户与权限、调整仓库名权限段，并创建：
-
-```text
-trunk/
-branches/
-tags/
-```
-
-同一菜单也能新增用户和修改读写权限。修改认证文件前会自动备份。
+- 不自动搜索本地项目。
+- 执行前显示本地路径、远程地址、提交项和忽略项。
+- 远程 `trunk` 非空时拒绝执行第一次上传。
+- 首次连接失败时删除新生成的 `.svn`，不删除项目文件。
+- 不自动提交，最终上传必须由用户确认。
+- 服务端修改认证配置前创建备份。
 
 ## 高级命令
 
-不使用菜单时也可以执行：
-
 ```bash
-SvnEasyClient sync --config ./svneasy-client.json
+SvnEasyClient preview --config ./svneasy-client.json
+SvnEasyClient update --config ./svneasy-client.json
+SvnEasyClient commit --config ./svneasy-client.json
 
 svneasy-server create --from template-repo --name new-repo
 svneasy-server user --repo new-repo --name alice --access rw
-svneasy-server permission --repo new-repo --principal alice --path /trunk --access rw
-```
-
-查看全部参数：
-
-```bash
-SvnEasyClient help
-svneasy-server help
 ```
 
 ## 支持平台
@@ -111,7 +117,7 @@ svneasy-server help
 - Linux x64 / ARM64
 - macOS Intel / Apple Silicon
 
-## 从源码构建
+## 构建
 
 需要 Go 1.22 或更高版本：
 
