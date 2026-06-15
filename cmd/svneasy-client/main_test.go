@@ -89,6 +89,7 @@ func TestUnrealIgnorePatterns(t *testing.T) {
 	patterns := strings.Join(ignorePatterns(project), "|")
 	for _, expected := range []string{
 		"Binaries", "DerivedDataCache", "Intermediate", "Saved", "*.sln", ".vsconfig",
+		"*.DotSettings.user",
 	} {
 		if !strings.Contains(patterns, expected) {
 			t.Fatalf("ignore patterns do not contain %q: %s", expected, patterns)
@@ -200,10 +201,19 @@ func TestIntegrationFirstUploadKeepsUnrealGeneratedFilesOut(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(project, "Saved", "log.txt"), "generated")
 	mustWriteTestFile(t, filepath.Join(project, "FlappyBird.sln"), "generated")
 	mustWriteTestFile(t, filepath.Join(project, ".vsconfig"), "generated")
+	mustWriteTestFile(t, filepath.Join(project, "FlappyBird.sln.DotSettings.user"), "generated")
+	mustWriteTestFile(t, filepath.Join(project, "CustomCache", "cache.bin"), "custom")
 
 	runTestCommand(t, svn, root, "checkout", "--depth", "empty", repositoryURL+"/trunk", project)
+	runTestCommand(t, svn, project, "propset", "svn:ignore", "CustomCache", "--", project)
 	if err := applyIgnoreProperty(svn, project, ignorePatterns(project)); err != nil {
 		t.Fatal(err)
+	}
+	ignoreProperty := runTestCommand(t, svn, project, "propget", "svn:ignore", "--", project)
+	for _, expected := range []string{"CustomCache", "*.DotSettings.user"} {
+		if !strings.Contains(ignoreProperty, expected) {
+			t.Fatalf("ignore property does not preserve/include %q:\n%s", expected, ignoreProperty)
+		}
 	}
 	targets := suggestTargets(project, project)
 	tracker := tracker{
@@ -227,7 +237,10 @@ func TestIntegrationFirstUploadKeepsUnrealGeneratedFilesOut(t *testing.T) {
 			t.Fatalf("status does not contain shareable item %q:\n%s", expected, status)
 		}
 	}
-	for _, excluded := range []string{"I       Binaries", "I       Intermediate", "I       Saved", "I       FlappyBird.sln", "I       .vsconfig"} {
+	for _, excluded := range []string{
+		"I       Binaries", "I       Intermediate", "I       Saved", "I       FlappyBird.sln",
+		"I       .vsconfig", "I       FlappyBird.sln.DotSettings.user", "I       CustomCache",
+	} {
 		if !strings.Contains(status, excluded) {
 			t.Fatalf("status does not show excluded item %q as ignored:\n%s", excluded, status)
 		}

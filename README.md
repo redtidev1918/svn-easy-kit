@@ -53,6 +53,7 @@ Intermediate
 Saved
 *.sln
 .vsconfig
+*.DotSettings.user
 ```
 
 工具不会扫描桌面或文档目录，也不会猜测项目位置。

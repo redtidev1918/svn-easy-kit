@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-const version = "1.2.0"
+const version = "1.2.1"
 
 type Config struct {
 	WorkingCopy      string   `json:"workingCopy"`
@@ -1078,7 +1078,8 @@ func ignorePatterns(project string) []string {
 	if isUnrealProject(project) {
 		return []string{
 			".idea", ".vs", "Binaries", "DerivedDataCache", "Intermediate", "Saved",
-			"*.sln", "*.suo", "*.VC.db", "*.opensdf", "*.opendb", "*.sdf", ".vsconfig",
+			"*.sln", "*.suo", "*.VC.db", "*.opensdf", "*.opendb", "*.sdf",
+			".vsconfig", "*.DotSettings.user",
 		}
 	}
 	return []string{".idea", ".vs", "node_modules", "build", "dist", "target", "*.log", "Thumbs.db"}
@@ -1117,13 +1118,36 @@ func configForProject(workingCopy, project string, targets []string) Config {
 }
 
 func applyIgnoreProperty(svn, project string, patterns []string) error {
+	merged := make([]string, 0, len(patterns))
+	seen := make(map[string]struct{}, len(patterns))
+	appendPattern := func(pattern string) {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			return
+		}
+		if _, exists := seen[pattern]; exists {
+			return
+		}
+		seen[pattern] = struct{}{}
+		merged = append(merged, pattern)
+	}
+	for _, pattern := range patterns {
+		appendPattern(pattern)
+	}
+	if existing, err := runCommand(svn, project, "propget", "svn:ignore", "--", project); err == nil {
+		existing = strings.ReplaceAll(existing, "\r\n", "\n")
+		for _, pattern := range strings.Split(existing, "\n") {
+			appendPattern(pattern)
+		}
+	}
+
 	temp, err := os.CreateTemp("", "svneasy-ignore-*.txt")
 	if err != nil {
 		return err
 	}
 	tempPath := temp.Name()
 	defer os.Remove(tempPath)
-	if _, err := temp.WriteString(strings.Join(patterns, "\n") + "\n"); err != nil {
+	if _, err := temp.WriteString(strings.Join(merged, "\n") + "\n"); err != nil {
 		_ = temp.Close()
 		return err
 	}
@@ -1200,6 +1224,9 @@ func installClient(args []string) error {
 	}
 	defer t.close()
 	if _, err := t.status(); err != nil {
+		return err
+	}
+	if err := applyIgnoreProperty(t.svn, t.scanRoot, ignorePatterns(t.scanRoot)); err != nil {
 		return err
 	}
 	if err := t.sync(); err != nil {
